@@ -46,6 +46,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       "db-pipe"
       "fuzzy-parse"
       "suckless-conf"
+      "hsfuse"
       ];
 
     jailbreakUnbreak = pkgs: pkg:
