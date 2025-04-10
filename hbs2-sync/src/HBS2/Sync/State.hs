@@ -28,7 +28,7 @@ import DBPipe.SQLite
 import Data.Config.Suckless.Script.File
 
 import Control.Concurrent.STM (flushTQueue)
-import Control.Monad.Except
+import Control.Monad.Except ( runExceptT )
 import Control.Monad.Trans.Maybe
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString qualified as BS
