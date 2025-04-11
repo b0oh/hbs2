@@ -116,7 +116,6 @@ createTreeWithMetadata sto mgk meta lbs = do -- flip runContT pure do
 
       runExceptT $ writeAsMerkle sto source <&> HashRef
 
-
 getTreeContents :: forall m . ( MonadUnliftIO m
                               , MonadIO m
                               , MonadError OperationError m
@@ -126,12 +125,16 @@ getTreeContents :: forall m . ( MonadUnliftIO m
                 -> m LBS.ByteString
 
 getTreeContents sto href = do
+  let ln = "/Users/dima/merkle.log"
+  liftIO $ wl ln "1"
 
   blk <- getBlock sto (coerce href)
            >>= orThrowError MissedBlockError
+  liftIO $ wl ln "2"
 
   let q = tryDetect (coerce href) blk
 
+  liftIO $ wl ln "3"
   case q of
 
     Merkle _ -> do

@@ -36,6 +36,9 @@ import Control.Monad.Trans.Cont
 import UnliftIO
 import Control.Concurrent.STM (retry)
 import Streaming.Prelude qualified as S
+import System.IO qualified as IO
+import Data.Time.Format qualified as Time
+import Data.Time.Clock qualified as Time
 
 data UNIX = UNIX
             deriving (Eq,Ord,Show,Generic)
@@ -135,12 +138,26 @@ myAcceptReport MessagingUnix{..} values = do
   debug "myAcceptReport"
   acceptReport p values
 
+
+wl path line = liftIO $ do
+  time <- Time.getCurrentTime
+  log <- IO.openFile path ReadWriteMode
+  IO.hSeek log SeekFromEnd 0
+  let prefix = Time.formatTime Time.defaultTimeLocale "%F %T%Q" time
+  IO.hPutStr log $ "[" <> prefix <> "] "
+  IO.hPutStrLn log line
+  IO.hFlush log
+  IO.hClose log
+
 runMessagingUnix :: MonadUnliftIO m => MessagingUnix -> m ()
 runMessagingUnix env = do
+  let ln = "/Users/dima/unix.log"
 
-  if msgUnixServer env then
+  if msgUnixServer env then do
+    wl ln "1"
     liftIO runServer
-  else
+  else do
+    wl ln "1"
     runClient
 
   where

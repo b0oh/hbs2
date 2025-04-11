@@ -65,6 +65,9 @@ import System.Directory
 import System.Exit qualified as Exit
 import System.IO qualified as IO
 import UnliftIO as Exported
+import System.IO qualified as IO
+import Data.Time.Format qualified as Time
+import Data.Time.Clock qualified as Time
 
 {- HLINT ignore "Functor law" -}
 {- HLINT ignore "Eta reduce" -}
@@ -256,8 +259,20 @@ runSyncApp m = do
   setupLogger
   withSyncApp Nothing m `finally` flushLoggers
 
+
+wl path line = liftIO $ do
+  time <- Time.getCurrentTime
+  log <- IO.openFile path ReadWriteMode
+  IO.hSeek log SeekFromEnd 0
+  let prefix = Time.formatTime Time.defaultTimeLocale "%F %T%Q" time
+  IO.hPutStr log $ "[" <> prefix <> "] "
+  IO.hPutStrLn log line
+  IO.hFlush log
+  IO.hClose log
+
 recover :: SyncApp IO a -> SyncApp IO a
 recover what = do
+  wl "/Users/dima/recover.log" "1"
   catch what $ \case
     PeerNotConnectedException -> do
 

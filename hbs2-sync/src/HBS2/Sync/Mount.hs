@@ -13,6 +13,7 @@ import HBS2.Peer.CLI.Detect (detectRPC)
 import HBS2.Peer.RPC.API.Storage qualified as Storage
 import HBS2.Peer.RPC.Client qualified as Client
 import HBS2.Peer.RPC.Client.StorageClient qualified as Client
+import HBS2.Peer.RPC.Client.Unix
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 
 import Control.Monad.Except (runExceptT)
@@ -28,45 +29,18 @@ import System.Fuse qualified as Fuse
 import System.IO qualified as IO
 import System.Posix.Files qualified as Posix
 import System.Posix.Types qualified as Posix
-import Data.STRef (newSTRef, writeSTRef)
 
 type FuseOp a = IO (Either Fuse.Errno a)
 
---type Tree = HM.HashMap FilePath Entry
-
---data Tree = Dir FilePath [Tree] | File FilePath Entry
-
 type Tree = Map.Map FilePath Entry
 
-
-openLog :: FilePath -> IO Handle
-openLog path = do
-  handle <- openFile path ReadWriteMode
-  IO.hSeek handle SeekFromEnd 0
-  return handle
-
-_log :: Handle -> String -> IO ()
-_log handle line = do
-  time <- Time.getCurrentTime
-  let prefix = Time.formatTime Time.defaultTimeLocale "%F %T%Q" time
-  IO.hPutStr handle $ "[" <> prefix <> "] "
-  IO.hPutStrLn handle line
-  IO.hFlush handle
+data State = State
+  { storage :: AnyStorage
+  , tree :: Tree
+  }
 
 rootPath :: FilePath
 rootPath = "/"
-
-
-opInit :: IORef AnyStorage -> IO ()
-opInit storageRef = do
-  maybeSoname <- detectRPC
-  case maybeSoname of
-    Just soname -> do
-      storageAPI :: Client.ServiceCaller Storage.StorageAPI UNIX <- HBS2.makeServiceCaller @Storage.StorageAPI (fromString soname)
-      let storage = AnyStorage (Client.StorageClient storageAPI)
-      writeIORef storageRef storage
-    Nothing ->
-      pure ()
 
 buildTree :: Foldable t => t Entry -> Map.Map FilePath Entry
 buildTree entries =
@@ -128,8 +102,32 @@ fileStat ctx =
   in
   Fuse.FileStat { .. }
 
-getFileStat :: Tree -> FilePath -> FuseOp Fuse.FileStat
-getFileStat tree path
+initStorage :: IO (Maybe AnyStorage)
+initStorage = do
+  maybeSoname <- detectRPC
+  case maybeSoname of
+    Just soname -> do
+      flip runContT pure do
+        client <- lift $ race (pause @'Seconds 1) (newMessagingUnix False 1.0 soname)
+                  >>= orThrowUser ("can't connect to" <+> pretty soname)
+
+        void $ ContT $ withAsync $ runMessagingUnix client
+        storageAPI <- HBS2.makeServiceCaller @Storage.StorageAPI (fromString soname)
+        let endpoints = [ Endpoint @UNIX  storageAPI ]
+        void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
+        return $ Just $ AnyStorage (Client.StorageClient storageAPI)
+
+    _ ->
+      pure Nothing
+
+onInit :: IORef (Maybe AnyStorage) -> IO ()
+onInit ref = do
+  return ()
+  --storage <- initStorage
+  --writeIORef ref storage
+
+onGetFileStat :: Tree -> FilePath -> FuseOp Fuse.FileStat
+onGetFileStat tree path
   | path == rootPath =
     Right . dirStat <$> Fuse.getFuseContext
 
@@ -144,8 +142,8 @@ getFileStat tree path
       _ ->
         return $ Left Fuse.eNOENT
 
-opOpen :: Tree -> FilePath -> Fuse.OpenMode -> Fuse.OpenFileFlags -> FuseOp ()
-opOpen tree path mode _flags =
+onOpen :: Tree -> FilePath -> Fuse.OpenMode -> Fuse.OpenFileFlags -> FuseOp ()
+onOpen tree path mode _flags =
   case Map.lookup (dropWhile (== '/') path) tree of
     Just (DirEntry (EntryDesc { entryType = File }) _) ->
       case mode of
@@ -155,55 +153,48 @@ opOpen tree path mode _flags =
         _ ->
           return $ Left Fuse.eACCES
 
-    Nothing ->
+    _ ->
       return $ Left Fuse.eNOENT
 
-opRead :: IORef AnyStorage -> Tree -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -> FuseOp BS.ByteString
-opRead storageRef tree path _ byteCount offset = do
-  storage <- readIORef storageRef
-  wtf <- openLog "/Users/dima/reads.log"
-  _log wtf "one"
+onRead :: IORef (Maybe AnyStorage) -> Tree -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -> FuseOp BS.ByteString
+onRead ref tree path _ byteCount offset = do
+  case Map.lookup (dropWhile (== '/') path) tree of
+    Just entry@(DirEntry (EntryDesc { entryType = File }) _) ->
+      case getEntryHash entry of
+        Just hash -> do
+          maybeSoname <- detectRPC
+          case maybeSoname of
+            Just soname -> do
+              flip runContT pure do
+                client <- lift $ race (pause @'Seconds 1) (newMessagingUnix False 1.0 soname)
+                          >>= orThrowUser ("can't connect to" <+> pretty soname)
 
-  maybeSoname <- detectRPC
-  case maybeSoname of
-    Just soname -> do
-
-      _log wtf soname
-      storageAPI :: Client.ServiceCaller Storage.StorageAPI UNIX <- HBS2.makeServiceCaller @Storage.StorageAPI (fromString soname)
-      let storage = AnyStorage (Client.StorageClient storageAPI)
-
-      case Map.lookup (dropWhile (== '/') path) tree of
-        Just entry@(DirEntry (EntryDesc { entryType = File }) _) -> do
-          _log wtf "two"
-          case getEntryHash entry of
-            Just hash -> do
-              _log wtf "tree"
-              let tc = getTreeContents storage hash
-              _log wtf "four"
-              eitherContent <- runExceptT tc
-              _log wtf "five"
-              case eitherContent of
-                Right content -> do
-                  _log wtf "six"
-
-                  content
-                    & LBS.drop (fromIntegral offset)
-                    & LBS.take (fromIntegral byteCount)
-                    & LBS.toStrict
-                    & Right
-                    & return
-
-                Left _ ->
-                  return $ Left Fuse.eNOENT
-
-            Nothing ->
+                void $ ContT $ withAsync $ runMessagingUnix client
+                storageAPI <- HBS2.makeServiceCaller @Storage.StorageAPI (fromString soname)
+                let endpoints = [ Endpoint @UNIX  storageAPI ]
+                void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
+                let storage = AnyStorage (Client.StorageClient storageAPI)
+                eitherContent <- lift $ runExceptT (getTreeContents storage hash)
+                case eitherContent of
+                  Right content ->
+                    content
+                      & LBS.drop (fromIntegral offset)
+                      & LBS.take (fromIntegral byteCount)
+                      & LBS.toStrict
+                      & Right
+                      & return
+                  _ ->
+                    return $ Left Fuse.eNOENT
+            _ ->
               return $ Left Fuse.eNOENT
-
         _ ->
           return $ Left Fuse.eNOENT
+    _ ->
+      return $ Left Fuse.eNOENT
 
-openDirectory :: Monad m => Tree -> String -> m Fuse.Errno
-openDirectory tree path
+
+onOpenDirectory :: Monad m => Tree -> String -> m Fuse.Errno
+onOpenDirectory tree path
   | path == rootPath =
     return Fuse.eOK
 
@@ -226,8 +217,8 @@ stat context tree prefix path =
     _ ->
       []
 
-readDirectory :: Tree -> FilePath -> FuseOp [(FilePath, Fuse.FileStat)]
-readDirectory tree path
+onReadDirectory :: Tree -> FilePath -> FuseOp [(FilePath, Fuse.FileStat)]
+onReadDirectory tree path
   | path == rootPath = do
     context <- Fuse.getFuseContext
     let entries =
@@ -263,8 +254,8 @@ readDirectory tree path
       _ ->
         return $ Left Fuse.eNOENT
 
-getFileSystemStats :: String -> FuseOp Fuse.FileSystemStats
-getFileSystemStats _ =
+onGetFileSystemStats :: String -> FuseOp Fuse.FileSystemStats
+onGetFileSystemStats _ =
   return $ Right $ Fuse.FileSystemStats
     { fsStatBlockSize = 512
     , fsStatBlockCount = 1
@@ -275,42 +266,27 @@ getFileSystemStats _ =
     , fsStatMaxNameLength = 255
     }
 
-operations :: IORef AnyStorage -> Tree -> Fuse.FuseOperations ()
+operations :: IORef (Maybe AnyStorage) -> Tree -> Fuse.FuseOperations ()
 operations ref tree =
   Fuse.defaultFuseOps
-    { fuseGetFileStat = getFileStat tree
-    , fuseGetFileSystemStats = getFileSystemStats
-    , fuseInit = opInit ref
-    , fuseOpen = opOpen tree
-    , fuseOpenDirectory = openDirectory tree
-    , fuseRead = opRead ref tree
-    , fuseReadDirectory = readDirectory tree
+    { fuseGetFileStat = onGetFileStat tree
+    , fuseGetFileSystemStats = onGetFileSystemStats
+    , fuseInit = onInit ref
+    , fuseOpen = onOpen tree
+    , fuseOpenDirectory = onOpenDirectory tree
+    , fuseRead = onRead ref tree
+    , fuseReadDirectory = onReadDirectory tree
     }
 
 mountPath ::
   forall c m.
-  ( Client.HasClientAPI Storage.StorageAPI UNIX m
-  , HasStorage m
-  , IsContext c
+  ( IsContext c
   , MonadUnliftIO m
   )
   => [Entry]
   -> FilePath
   -> RunM c m ()
 mountPath entries path = do
-  storage <- getStorage
-  storageRef <- newIORef storage
   let tree = buildTree entries
-
-  liftIO $ putStrLn $ show tree
-
-  case Map.lookup "yo" tree of
-    Just entry@(DirEntry (EntryDesc { entryType = File }) _) ->
-      case getEntryHash entry of
-        Just hash -> do
-          eitherContent <- runExceptT (getTreeContents storage hash)
-          case eitherContent of
-            Right content ->
-             liftIO $ putStrLn $ show content
-
-  liftIO $ Fuse.fuseRun "sync mount" [path] (operations storageRef tree) Fuse.defaultExceptionHandler
+  ref <- newIORef Nothing
+  liftIO $ Fuse.fuseRun "sync mount" [path] (operations ref tree) Fuse.defaultExceptionHandler
