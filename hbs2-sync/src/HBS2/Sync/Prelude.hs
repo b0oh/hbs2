@@ -259,17 +259,6 @@ runSyncApp m = do
   setupLogger
   withSyncApp Nothing m `finally` flushLoggers
 
-
-wl path line = liftIO $ do
-  time <- Time.getCurrentTime
-  log <- IO.openFile path ReadWriteMode
-  IO.hSeek log SeekFromEnd 0
-  let prefix = Time.formatTime Time.defaultTimeLocale "%F %T%Q" time
-  IO.hPutStr log $ "[" <> prefix <> "] "
-  IO.hPutStrLn log line
-  IO.hFlush log
-  IO.hClose log
-
 recover :: SyncApp IO a -> SyncApp IO a
 recover what = do
   wl "/Users/dima/recover.log" "1"
@@ -512,3 +501,14 @@ waitForRefchan refchan timeout = do
         Nothing -> do
           pause @'Seconds seconds
           wait (seconds * 2)
+
+
+wl path line = liftIO $ do
+  time <- Time.getCurrentTime
+  log <- IO.openFile path ReadWriteMode
+  IO.hSeek log SeekFromEnd 0
+  let prefix = Time.formatTime Time.defaultTimeLocale "%F %T%Q" time
+  IO.hPutStr log $ "[" <> prefix <> "] "
+  IO.hPutStrLn log line
+  IO.hFlush log
+  IO.hClose log

@@ -253,7 +253,7 @@ hbs2-sync init --refchan 94GF31TtD38yWG6iZLRy1xZBb1dxcAC7BRBJTMyAq8VF
 
         accepted <- getAccepted refchan <&> L.sortOn getEntryTimestamp
         --let tree = foldl (\acc entry -> HM.insert (entryPath entry) entry acc) HM.empty accepted
-        mountPath accepted path
+        mountPath refchan accepted path
 
       _ ->
         err "unknown"
