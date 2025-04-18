@@ -251,9 +251,7 @@ hbs2-sync init --refchan 94GF31TtD38yWG6iZLRy1xZBb1dxcAC7BRBJTMyAq8VF
            view dirSyncRefChan env
              & orThrowUser "refchan not found"
 
-        accepted <- getAccepted refchan <&> L.sortOn getEntryTimestamp
-        --let tree = foldl (\acc entry -> HM.insert (entryPath entry) entry acc) HM.empty accepted
-        mountPath refchan accepted path
+        liftIO $ mountPath refchan path
 
       _ ->
         err "unknown"
