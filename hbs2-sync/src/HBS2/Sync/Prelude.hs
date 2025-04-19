@@ -261,7 +261,6 @@ runSyncApp m = do
 
 recover :: SyncApp IO a -> SyncApp IO a
 recover what = do
-  wl "/Users/dima/recover.log" "1"
   catch what $ \case
     PeerNotConnectedException -> do
 

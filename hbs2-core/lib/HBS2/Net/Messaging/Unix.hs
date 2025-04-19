@@ -139,25 +139,11 @@ myAcceptReport MessagingUnix{..} values = do
   acceptReport p values
 
 
-wl path line = liftIO $ do
-  time <- Time.getCurrentTime
-  log <- IO.openFile path ReadWriteMode
-  IO.hSeek log SeekFromEnd 0
-  let prefix = Time.formatTime Time.defaultTimeLocale "%F %T%Q" time
-  IO.hPutStr log $ "[" <> prefix <> "] "
-  IO.hPutStrLn log line
-  IO.hFlush log
-  IO.hClose log
-
 runMessagingUnix :: MonadUnliftIO m => MessagingUnix -> m ()
-runMessagingUnix env = do
-  let ln = "/Users/dima/unix.log"
-
-  if msgUnixServer env then do
-    wl ln "1"
+runMessagingUnix env =
+  if msgUnixServer env then
     liftIO runServer
-  else do
-    wl ln "1"
+  else
     runClient
 
   where

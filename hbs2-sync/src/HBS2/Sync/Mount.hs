@@ -5,10 +5,9 @@ module HBS2.Sync.Mount
 import HBS2.Sync.Prelude hiding (SyncEnv(..))
 import HBS2.Sync.State
 
-
 import HBS2.CLI.Run.MetaData (getTreeContents)
 import HBS2.KeyMan.Keys.Direct qualified as KE
-import HBS2.Net.Messaging.Unix hiding (wl)
+import HBS2.Net.Messaging.Unix as Unix
 import HBS2.Net.Proto.Service qualified as HBS2
 import HBS2.Peer.CLI.Detect (detectRPC)
 import HBS2.Peer.RPC.API.Peer qualified as Peer
@@ -29,6 +28,7 @@ import System.IO qualified as IO
 import System.Posix.Files qualified as Posix
 import System.Posix.Types qualified as Posix
 import Control.Concurrent (threadDelay)
+import Data.Int (Int64)
 
 type FuseOp a = IO (Either Fuse.Errno a)
 
@@ -111,10 +111,17 @@ buildTree entries =
         entriesFromFile (getEntryHash entry) (getEntryTimestamp entry) (entryPath entry)
       else
         Map.empty
+
+    prependSlash (DirEntry desc path) acc =
+      let
+        newPath = "/" <> path
+      in
+      Map.insert newPath (DirEntry desc newPath) acc
   in
   entries
     & foldl (\acc entry -> Map.insert (entryPath entry) entry acc) Map.empty
-    & foldr (\entry acc -> Map.union (addDirs entry) acc)  Map.empty
+    & foldr (\entry acc -> Map.union (addDirs entry) acc) Map.empty
+    & Map.foldr prependSlash Map.empty
 
 dirStat :: Fuse.FuseContext -> Fuse.FileStat
 dirStat ctx =
@@ -141,8 +148,8 @@ dirStat ctx =
   in
   Fuse.FileStat { .. }
 
-fileStat :: Fuse.FuseContext -> Fuse.FileStat
-fileStat ctx =
+fileStat :: Int64 -> Fuse.FuseContext -> Fuse.FileStat
+fileStat size ctx =
   let
     statEntryType = Fuse.RegularFile
     statFileMode =
@@ -155,7 +162,7 @@ fileStat ctx =
     statFileOwner = Fuse.fuseCtxUserID ctx
     statFileGroup = Fuse.fuseCtxGroupID ctx
     statSpecialDeviceID = 0
-    statFileSize = 4096
+    statFileSize = fromIntegral size
     statBlocks = 1
     statAccessTime = 0
     statModificationTime = 0
@@ -186,12 +193,24 @@ onGetFileStat ref path
 
   | otherwise = do
     State{..} <- readIORef ref
-    case Map.lookup (dropWhile (== '/') path) tree of
+    case Map.lookup path tree of
       Just (DirEntry (EntryDesc { entryType = Dir }) _) ->
         Right . dirStat <$> Fuse.getFuseContext
 
-      Just (DirEntry (EntryDesc { entryType = File }) _) ->
-        Right . fileStat <$> Fuse.getFuseContext
+      Just entry@(DirEntry (EntryDesc { entryType = File }) _) ->
+        case getEntryHash entry of
+          Just hash -> do
+            size <- withEnv do
+              storage <- getStorage
+              eitherContent <- runExceptT (getTreeContents storage hash)
+              case eitherContent of
+                Right content ->
+                  return $ (LBS.length content)
+
+            Right . fileStat size <$> Fuse.getFuseContext
+
+          _ ->
+            return $ Left Fuse.eNOENT
 
       _ ->
         return $ Left Fuse.eNOENT
@@ -199,7 +218,7 @@ onGetFileStat ref path
 onOpen :: IORef State -> FilePath -> Fuse.OpenMode -> Fuse.OpenFileFlags -> FuseOp ()
 onOpen ref path mode _flags = do
   State{..} <- readIORef ref
-  case Map.lookup (dropWhile (== '/') path) tree of
+  case Map.lookup path tree of
     Just (DirEntry (EntryDesc { entryType = File }) _) ->
       case mode of
         Fuse.ReadOnly ->
@@ -215,7 +234,7 @@ onRead :: IORef State -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -
 onRead ref path _ byteCount offset = do
   State{..} <- readIORef ref
   withEnv $ do
-    case Map.lookup (dropWhile (== '/') path) tree of
+    case Map.lookup path tree of
       Just entry@(DirEntry (EntryDesc { entryType = File }) _) ->
         case getEntryHash entry of
           Just hash -> do
@@ -246,7 +265,7 @@ onOpenDirectory ref path
 
   | otherwise = do
     State{..} <- readIORef ref
-    case Map.lookup (dropWhile (== '/') path) tree of
+    case Map.lookup path tree of
       Just (DirEntry (EntryDesc { entryType = Dir }) _) ->
         return Fuse.eOK
 
@@ -259,49 +278,35 @@ stat context tree prefix path =
       [(path, dirStat context)]
 
     Just (DirEntry (EntryDesc { entryType = File }) _) ->
-      [(path, fileStat context)]
+      [(path, fileStat 4096 context)]
 
     _ ->
       []
 
+makeEntries context tree prefix =
+  Map.keys tree
+    & filter (List.isPrefixOf prefix)
+    & map (\path -> takeWhile (/= '/') $ fromMaybe path $ List.stripPrefix prefix path)
+    & List.nub
+    & concatMap (stat context tree prefix)
+
 onReadDirectory :: IORef State -> FilePath -> FuseOp [(FilePath, Fuse.FileStat)]
-onReadDirectory ref path
-  | path == rootPath = do
+onReadDirectory ref path =
+  let
+    prefix =
+      if path == rootPath then
+        rootPath
+      else
+        path <> "/"
+  in do
     State{..} <- readIORef ref
     context <- Fuse.getFuseContext
-    let entries =
-          Map.keys tree
-            & map (takeWhile (/= '/'))
-            & List.nub
-            & concatMap (stat context tree "")
+    let entries = makeEntries context tree prefix
 
     return $ Right $
       [ (".", dirStat context)
       , ("..", dirStat context)
       ] <> entries
-
-  | otherwise =
-    let
-      prefix = (dropWhile (== '/') path) <> "/"
-    in do
-      State{..} <- readIORef ref
-      case Map.lookup (dropWhile (== '/') path) tree of
-        Just (DirEntry (EntryDesc { entryType = Dir }) _) -> do
-          context <- Fuse.getFuseContext
-          let entries =
-                Map.keys tree
-                  & filter (List.isPrefixOf prefix)
-                  & map (\path -> takeWhile (/= '/') $ fromMaybe path $ List.stripPrefix prefix path)
-                  & List.nub
-                  & concatMap (stat context tree prefix)
-
-          return $ Right $
-            [ (".", dirStat context)
-            , ("..", dirStat context)
-            ] <> entries
-
-        _ ->
-          return $ Left Fuse.eNOENT
 
 onGetFileSystemStats :: String -> FuseOp Fuse.FileSystemStats
 onGetFileSystemStats _ =
