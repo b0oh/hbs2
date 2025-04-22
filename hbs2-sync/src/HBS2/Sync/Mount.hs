@@ -56,7 +56,6 @@ data State =
     { refChan :: MyRefChan
     , tree :: Tree
     }
-  deriving Show
 
 instance MonadUnliftIO m => HasKeyManClient (MountApp m) where
   getKeyManClientEnv = ask <&> keymanClientEnv
@@ -75,30 +74,26 @@ instance MonadIO m => HasStorage (MountApp m) where
     api <- Client.getClientAPI @Storage.StorageAPI @UNIX
     pure $ AnyStorage (Client.StorageClient api)
 
-
 withEnv :: MonadUnliftIO m => MountApp IO a -> m a
 withEnv action = do
-  maybeSoname <- detectRPC
-  case maybeSoname of
-    Just soname -> do
-      flip runContT pure do
-        client <- lift $ race (pause @'Seconds 1) (newMessagingUnix False 1.0 soname)
-                  >>= orThrowUser ("can't connect to" <+> pretty soname)
-        void $ ContT $ withAsync $ runMessagingUnix client
+  soname <- detectRPC >>= orThrowUser "could not detect RPC"
+  flip runContT pure do
+    client <- newMessagingUnix False 1.0 soname
+    void $ ContT $ withAsync $ runMessagingUnix client
 
-        peerAPI <- HBS2.makeServiceCaller @Peer.PeerAPI (fromString soname)
-        refChanAPI <- HBS2.makeServiceCaller @RefChan.RefChanAPI (fromString soname)
-        storageAPI <- HBS2.makeServiceCaller @Storage.StorageAPI (fromString soname)
-        let endpoints = [ Endpoint @UNIX peerAPI
-                        , Endpoint @UNIX refChanAPI
-                        , Endpoint @UNIX storageAPI
-                        ]
-        void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
+    peerAPI <- HBS2.makeServiceCaller @Peer.PeerAPI (fromString soname)
+    refChanAPI <- HBS2.makeServiceCaller @RefChan.RefChanAPI (fromString soname)
+    storageAPI <- HBS2.makeServiceCaller @Storage.StorageAPI (fromString soname)
+    let endpoints = [ Endpoint @UNIX peerAPI
+                    , Endpoint @UNIX refChanAPI
+                    , Endpoint @UNIX storageAPI
+                    ]
+    void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
 
-        keymanClientEnv <- liftIO $ KE.newKeymanClientEnv
+    keymanClientEnv <- liftIO $ KE.newKeymanClientEnv
 
-        let env = MountEnv{..}
-        liftIO $ runReaderT (fromMountApp action) env
+    let env = MountEnv{..}
+    liftIO $ runReaderT (fromMountApp action) env
 
 rootPath :: FilePath
 rootPath = "/"
@@ -170,29 +165,27 @@ fileStat size ctx =
   in
   Fuse.FileStat { .. }
 
-onInit :: IORef State -> IO ()
-onInit ref = do
-  State{..} <- readIORef ref
-  withEnv do
-    accepted <- getAccepted refChan
-    let tree = buildTree accepted
-    writeIORef ref State{..}
-
+onInit :: IORef (Maybe State) -> MyRefChan -> IO ()
+onInit ref refChan = do
+  let ln = "/Users/dima/tick.log"
   async $ do
-    forever $ do
-      let ln = "/Users/dima/tick.log"
-      wl ln "tick"
-      liftIO $ threadDelay 5000000
+    withEnv do
+      forever $ do
+        accepted <- getAccepted refChan
+        let tree = buildTree accepted
+        writeIORef ref $ Just State{..}
+        wl ln $ show tree
+        liftIO $ threadDelay 5000000
 
   return ()
 
-onGetFileStat :: IORef State -> FilePath -> FuseOp Fuse.FileStat
+onGetFileStat :: IORef (Maybe State) -> FilePath -> FuseOp Fuse.FileStat
 onGetFileStat ref path
   | path == rootPath =
     Right . dirStat <$> Fuse.getFuseContext
 
   | otherwise = do
-    State{..} <- readIORef ref
+    Just State{..} <- readIORef ref
     case Map.lookup path tree of
       Just (DirEntry (EntryDesc { entryType = Dir }) _) ->
         Right . dirStat <$> Fuse.getFuseContext
@@ -215,9 +208,9 @@ onGetFileStat ref path
       _ ->
         return $ Left Fuse.eNOENT
 
-onOpen :: IORef State -> FilePath -> Fuse.OpenMode -> Fuse.OpenFileFlags -> FuseOp ()
+onOpen :: IORef (Maybe State) -> FilePath -> Fuse.OpenMode -> Fuse.OpenFileFlags -> FuseOp ()
 onOpen ref path mode _flags = do
-  State{..} <- readIORef ref
+  Just State{..} <- readIORef ref
   case Map.lookup path tree of
     Just (DirEntry (EntryDesc { entryType = File }) _) ->
       case mode of
@@ -230,10 +223,10 @@ onOpen ref path mode _flags = do
     _ ->
       return $ Left Fuse.eNOENT
 
-onRead :: IORef State -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -> FuseOp BS.ByteString
+onRead :: IORef (Maybe State) -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -> FuseOp BS.ByteString
 onRead ref path _ byteCount offset = do
-  State{..} <- readIORef ref
-  withEnv $ do
+  Just State{..} <- readIORef ref
+  withEnv do
     case Map.lookup path tree of
       Just entry@(DirEntry (EntryDesc { entryType = File }) _) ->
         case getEntryHash entry of
@@ -258,13 +251,13 @@ onRead ref path _ byteCount offset = do
         return $ Left Fuse.eNOENT
 
 
-onOpenDirectory :: IORef State -> String -> IO Fuse.Errno
+onOpenDirectory :: IORef (Maybe State) -> String -> IO Fuse.Errno
 onOpenDirectory ref path
   | path == rootPath =
     return Fuse.eOK
 
   | otherwise = do
-    State{..} <- readIORef ref
+    Just State{..} <- readIORef ref
     case Map.lookup path tree of
       Just (DirEntry (EntryDesc { entryType = Dir }) _) ->
         return Fuse.eOK
@@ -290,7 +283,7 @@ makeEntries context tree prefix =
     & List.nub
     & concatMap (stat context tree prefix)
 
-onReadDirectory :: IORef State -> FilePath -> FuseOp [(FilePath, Fuse.FileStat)]
+onReadDirectory :: IORef (Maybe State) -> FilePath -> FuseOp [(FilePath, Fuse.FileStat)]
 onReadDirectory ref path =
   let
     prefix =
@@ -299,7 +292,7 @@ onReadDirectory ref path =
       else
         path <> "/"
   in do
-    State{..} <- readIORef ref
+    Just State{..} <- readIORef ref
     context <- Fuse.getFuseContext
     let entries = makeEntries context tree prefix
 
@@ -320,12 +313,12 @@ onGetFileSystemStats _ =
     , fsStatMaxNameLength = 255
     }
 
-operations :: IORef State -> Fuse.FuseOperations ()
-operations ref =
+operations :: IORef (Maybe State) -> MyRefChan -> Fuse.FuseOperations ()
+operations ref refChan =
   Fuse.defaultFuseOps
     { fuseGetFileStat = onGetFileStat ref
     , fuseGetFileSystemStats = onGetFileSystemStats
-    , fuseInit = onInit ref
+    , fuseInit = onInit ref refChan
     , fuseOpen = onOpen ref
     , fuseOpenDirectory = onOpenDirectory ref
     , fuseRead = onRead ref
@@ -334,6 +327,5 @@ operations ref =
 
 mountPath :: MyRefChan -> FilePath -> IO ()
 mountPath refChan path = do
-  let tree = Map.empty
-  ref <- newIORef State{..}
-  Fuse.fuseRun "sync mount" [path] (operations ref) Fuse.defaultExceptionHandler
+  ref <- newIORef Nothing
+  Fuse.fuseRun "sync mount" [path] (operations ref refChan) Fuse.defaultExceptionHandler
