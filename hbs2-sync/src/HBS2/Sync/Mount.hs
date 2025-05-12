@@ -14,6 +14,7 @@ import HBS2.Peer.RPC.API.Peer qualified as Peer
 import HBS2.Peer.RPC.API.RefChan qualified as RefChan
 import HBS2.Peer.RPC.API.Storage qualified as Storage
 import HBS2.Peer.RPC.Client qualified as Client
+import HBS2.Peer.RPC.Client.RefChan qualified as Client
 import HBS2.Peer.RPC.Client.StorageClient qualified as Client
 import HBS2.Peer.RPC.Client.Unix (runServiceClientMulti, Endpoint(Endpoint), UNIX)
 
@@ -29,6 +30,7 @@ import System.Posix.Files qualified as Posix
 import System.Posix.Types qualified as Posix
 import Control.Concurrent (threadDelay)
 import Data.Int (Int64)
+import Control.Monad.Trans.Maybe
 
 type FuseOp a = IO (Either Fuse.Errno a)
 
@@ -167,15 +169,19 @@ fileStat size ctx =
 
 onInit :: IORef (Maybe State) -> MyRefChan -> IO ()
 onInit ref refChan = do
-  let ln = "/Users/dima/tick.log"
   async $ do
     withEnv do
+      valueRef <- newIORef Nothing
       forever $ do
-        accepted <- getAccepted refChan
-        let tree = buildTree accepted
-        writeIORef ref $ Just State{..}
-        wl ln $ show tree
-        liftIO $ threadDelay 5000000
+        value <- readIORef valueRef
+        currentValue <- Client.getRefChanValue @UNIX refChan
+        when (value /= currentValue) do
+          accepted <- getAccepted refChan
+          let tree = buildTree accepted
+          writeIORef ref $ Just State{..}
+          writeIORef valueRef currentValue
+
+        liftIO $ threadDelay 200000
 
   return ()
 
@@ -222,6 +228,7 @@ onOpen ref path mode _flags = do
 
     _ ->
       return $ Left Fuse.eNOENT
+
 
 onRead :: IORef (Maybe State) -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -> FuseOp BS.ByteString
 onRead ref path _ byteCount offset = do
