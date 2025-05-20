@@ -5,11 +5,14 @@ module HBS2.Sync.Mount
 import HBS2.Sync.Prelude hiding (SyncEnv(..))
 import HBS2.Sync.State
 
+import HBS2.Actors.Peer ( makeResponse, runProto )
 import HBS2.CLI.Run.MetaData (getTreeContents)
 import HBS2.KeyMan.Keys.Direct qualified as KE
 import HBS2.Net.Messaging.Unix as Unix
 import HBS2.Net.Proto.Service qualified as HBS2
+import HBS2.Net.Proto.Notify ( runNotifySink, makeNotifyClient, newNotifySink, runNotifyWorkerClient )
 import HBS2.Peer.CLI.Detect (detectRPC)
+import HBS2.Peer.Notify ( NotifyData( RefChanUpdated ), NotifyKey( ..), RefChanEvents )
 import HBS2.Peer.RPC.API.Peer qualified as Peer
 import HBS2.Peer.RPC.API.RefChan qualified as RefChan
 import HBS2.Peer.RPC.API.Storage qualified as Storage
@@ -169,19 +172,52 @@ fileStat size ctx =
 
 onInit :: IORef (Maybe State) -> MyRefChan -> IO ()
 onInit ref refChan = do
-  async $ do
+  let ln = "/Users/dima/init.log"
+  rpcSockPath' <- detectRPC >>= orThrowUser "could not detect RPC"
+  refChanNotifyClient <- newMessagingUnix False 1.0 rpcSockPath'
+  async1 <- async $ runMessagingUnix refChanNotifyClient
+
+  sink <- newNotifySink
+  async2 <- async $ flip runReaderT refChanNotifyClient $ do
+    runProto @UNIX
+      [ makeResponse (makeNotifyClient @(RefChanEvents L4Proto) sink)
+      ]
+
+  async3 <- async $ runNotifySink sink (RefChanNotifyKey refChan) $ \case
+    RefChanUpdated r v -> do
+      accepted <- withEnv $ getAccepted refChan
+      let tree = buildTree accepted
+      writeIORef ref $ Just State{..}
+
+      wl ln $ show $ pretty (AsBase58 r) <+> pretty v
+
+    _ -> do
+      wl ln $ "some other refchan event happened"
+
+  async4 <- async $ flip runReaderT refChanNotifyClient $ do
+    runNotifyWorkerClient sink
+
+  wl ln $ "workers"
+  accepted <- withEnv $ getAccepted refChan
+  let tree = buildTree accepted
+  writeIORef ref $ Just State{..}
+
+  {- async $ do
     withEnv do
       valueRef <- newIORef Nothing
       forever $ do
         value <- readIORef valueRef
         currentValue <- Client.getRefChanValue @UNIX refChan
         when (value /= currentValue) do
+
+          wl ln $ "updated"
+
           accepted <- getAccepted refChan
           let tree = buildTree accepted
-          writeIORef ref $ Just State{..}
+          --writeIORef ref $ Just State{..}
           writeIORef valueRef currentValue
 
-        liftIO $ threadDelay 200000
+        liftIO $ threadDelay 200000 -}
 
   return ()
 
@@ -232,6 +268,7 @@ onOpen ref path mode _flags = do
 
 onRead :: IORef (Maybe State) -> FilePath -> () -> Posix.ByteCount -> Posix.FileOffset -> FuseOp BS.ByteString
 onRead ref path _ byteCount offset = do
+  wl "/Users/dima/qwe.log" "read"
   Just State{..} <- readIORef ref
   withEnv do
     case Map.lookup path tree of
