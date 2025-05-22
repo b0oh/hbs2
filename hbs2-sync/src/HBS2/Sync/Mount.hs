@@ -34,6 +34,7 @@ import System.Posix.Types qualified as Posix
 import Control.Concurrent (threadDelay)
 import Data.Int (Int64)
 import Control.Monad.Trans.Maybe
+import Data.List (sortBy)
 
 type FuseOp a = IO (Either Fuse.Errno a)
 
@@ -103,7 +104,7 @@ withEnv action = do
 rootPath :: FilePath
 rootPath = "/"
 
-buildTree :: Foldable t => t Entry -> Map.Map FilePath Entry
+buildTree :: [Entry] -> Map.Map FilePath Entry
 buildTree entries =
   let
     addDirs entry =
@@ -119,8 +120,9 @@ buildTree entries =
       Map.insert newPath (DirEntry desc newPath) acc
   in
   entries
+    & List.sortOn getEntryTimestamp
     & foldl (\acc entry -> Map.insert (entryPath entry) entry acc) Map.empty
-    & foldr (\entry acc -> Map.union (addDirs entry) acc) Map.empty
+    & foldr (\entry acc -> Map.unionWith merge (addDirs entry) acc) Map.empty
     & Map.foldr prependSlash Map.empty
 
 dirStat :: Fuse.FuseContext -> Fuse.FileStat
